@@ -1,0 +1,10 @@
+clang
+%h -x c++-header
+-I../x86
+-I../opensource
+-I.
+--gcc-toolchain=/usr
+-isystem
+/opt/ros/melodic/include
+-isystem
+/usr/include/pcl-1.8

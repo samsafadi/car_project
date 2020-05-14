@@ -1,0 +1,6 @@
+clang
+%h -x c++-header
+-I../x86
+-I../opensource
+-I.
+--gcc-toolchain=/usr
