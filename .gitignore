@@ -1,4 +1,5 @@
-./catkin_ws/.ccls-cache 
-./catkin_ws/.ccls
-./catkin_ws/build
-./catkin_ws/devel
+catkin_ws/.ccls-cache 
+catkin_ws/.ccls
+catkin_ws/build
+catkin_ws/devel
+catkin_ws/.catkin_workspace
