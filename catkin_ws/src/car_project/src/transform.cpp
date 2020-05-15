@@ -13,6 +13,7 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/conversions.h>
 #include <pcl/filters/crop_box.h>
+#include <pcl/filters/voxel_grid.h>
 
 using namespace std;
 
@@ -76,10 +77,14 @@ cloudTransform(const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
     boxFilter.setMax(Eigen::Vector4f(maxX, maxY, maxZ, 1.0));
     boxFilter.setInputCloud(cloud_source);
     boxFilter.filter(*cloud_source);
-    cout << cloud_source->size() << endl;
+    //cout << cloud_source->size() << endl;
     boxFilter.setInputCloud(cloud_target);
     boxFilter.filter(*cloud_target);
-    cout << cloud_target->size() << endl;
+    //cout << cloud_target->size() << endl;
+    pcl::VoxelGrid<pcl::PointXYZ> sor;
+    sor.setInputCloud(cloud_target);
+    sor.setLeafSize(0.005, 0.005, 0.005);
+    sor.filter(*cloud_target);
 
     //cout << cloud_source->is_dense << endl;
     icp.setInputSource(cloud_source);

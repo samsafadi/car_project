@@ -7,5 +7,5 @@
 subdirs("gtest")
 subdirs("ros_astra_camera")
 subdirs("car_project")
-subdirs("my_pcl_tutorial")
+subdirs("tests")
 subdirs("video_stream_opencv")

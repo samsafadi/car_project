@@ -1,2 +1,2 @@
-car_project:my_pcl_tutorial:ros_astra_camera:video_stream_opencv
+car_project:ros_astra_camera:tests:video_stream_opencv
 -DCATKIN_DEVEL_PREFIX=/root/catkin_ws/devel -DCMAKE_INSTALL_PREFIX=/root/catkin_ws/install -G Unix Makefiles

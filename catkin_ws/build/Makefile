@@ -1832,17 +1832,17 @@ tf2_msgs_generate_messages_lisp/fast:
 .PHONY : tf2_msgs_generate_messages_lisp/fast
 
 #=============================================================================
-# Target rules for targets named example
+# Target rules for targets named experiments
 
 # Build rule for target.
-example: cmake_check_build_system
-	$(MAKE) -f CMakeFiles/Makefile2 example
-.PHONY : example
+experiments: cmake_check_build_system
+	$(MAKE) -f CMakeFiles/Makefile2 experiments
+.PHONY : experiments
 
 # fast build rule for target.
-example/fast:
-	$(MAKE) -f my_pcl_tutorial/CMakeFiles/example.dir/build.make my_pcl_tutorial/CMakeFiles/example.dir/build
-.PHONY : example/fast
+experiments/fast:
+	$(MAKE) -f tests/CMakeFiles/experiments.dir/build.make tests/CMakeFiles/experiments.dir/build
+.PHONY : experiments/fast
 
 #=============================================================================
 # Target rules for targets named run_tests_video_stream_opencv
@@ -2167,7 +2167,7 @@ help:
 	@echo "... tf2_msgs_generate_messages_cpp"
 	@echo "... tf2_msgs_generate_messages_py"
 	@echo "... tf2_msgs_generate_messages_lisp"
-	@echo "... example"
+	@echo "... experiments"
 	@echo "... run_tests_video_stream_opencv"
 	@echo "... video_stream_opencv"
 	@echo "... run_tests_video_stream_opencv_rostest"

@@ -133,7 +133,7 @@ if(NOT CMAKE_INSTALL_LOCAL_ONLY)
   include("/root/catkin_ws/build/gtest/cmake_install.cmake")
   include("/root/catkin_ws/build/ros_astra_camera/cmake_install.cmake")
   include("/root/catkin_ws/build/car_project/cmake_install.cmake")
-  include("/root/catkin_ws/build/my_pcl_tutorial/cmake_install.cmake")
+  include("/root/catkin_ws/build/tests/cmake_install.cmake")
   include("/root/catkin_ws/build/video_stream_opencv/cmake_install.cmake")
 
 endif()
