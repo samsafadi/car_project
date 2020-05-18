@@ -3,4 +3,6 @@
 ## TODOs
 * ~~Downsample clouds to improve performance~~
 * Testing for how good the transformations actually are
-* Implememt cluster extraction (Euclidean Cluster Extraction?)
+* ~~Implement cluster extraction (Euclidean Cluster Extraction?)~~
+* Pose estimation
+* Choose correct cluster to apply transformation
