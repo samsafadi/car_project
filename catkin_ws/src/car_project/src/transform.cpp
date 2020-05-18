@@ -21,20 +21,17 @@ const string TARGET_FILE_NAME ="/root/catkin_ws/src/car_project/target.pcd";
 
 // load PCD file for target
 pcl::PointCloud<pcl::PointXYZ>::Ptr
-loadTarget(string targetFileName)
-{
+loadTarget(string targetFileName) {
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
 
-    if (pcl::io::loadPCDFile<pcl::PointXYZ>(targetFileName, *cloud) == -1) 
-    {
+    if (pcl::io::loadPCDFile<pcl::PointXYZ>(targetFileName, *cloud) == -1) {
         PCL_ERROR("Couldn't read file \n");
     }
     cout << "Loaded " 
               << cloud->width * cloud->height
               << " data points from " << targetFileName << " with the following fields: "
               << endl;
-    /*for (size_t i = 0; i < cloud->points.size(); ++i)
-    {
+    /*for (size_t i = 0; i < cloud->points.size(); ++i) {
         cout << "   " << cloud->points[i].x
                   << " "   << cloud->points[i].y
                   << " "   << cloud->points[i].z << endl;
@@ -44,8 +41,7 @@ loadTarget(string targetFileName)
 }
 
 void
-cloudTransform(const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
-{
+cloudTransform(const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
     // Container for source and target clouds
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_target = loadTarget(TARGET_FILE_NAME);
     pcl::PCLPointCloud2* cloud_source2 = new pcl::PCLPointCloud2;
@@ -59,8 +55,7 @@ cloudTransform(const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
     pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
 
     /*const float bad_point = std::numeric_limits<float>::quiet_NaN();
-    for (size_t i = 0; i < cloud_source->points.size(); ++i)
-    {
+    for (size_t i = 0; i < cloud_source->points.size(); ++i) {
         pcl::PointCloud<pcl::PointXYZ> p = cloud_source->points[i];
         if(p.x == "nan" || p.y == "nan" || p.z == "nan")
             p.x = p.y = p.z = bad_point;
@@ -109,8 +104,7 @@ cloudTransform(const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
 }
 
 int
-main (int argc, char** argv) 
-{
+main (int argc, char** argv) {
    // Initialize ROS
    ros::init (argc, argv, "transform");
    ros::NodeHandle nh;
