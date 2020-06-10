@@ -1,0 +1,3 @@
+#!/bin/sh
+
+rosrun tests experiments cloud:=/camera/depth_registered/points image:=/camera/rgb/image_rect_color

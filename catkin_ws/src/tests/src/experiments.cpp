@@ -10,28 +10,35 @@
 #include <sensor_msgs/PointCloud2.h>
 #include <sensor_msgs/PointCloud.h>
 #include "pcl_ros/point_cloud.h"
+#include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
+#include <pcl/io/pcd_io.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/filters/crop_box.h>
-#include <pcl/ModelCoefficients.h>
-#include <pcl/point_types.h>
-#include <pcl/io/pcd_io.h>
+#include <pcl/filters/uniform_sampling.h>
 #include <pcl/filters/extract_indices.h>
-#include <pcl/features/normal_3d.h>
+#include <pcl/ModelCoefficients.h>
+#include <pcl/features/normal_3d_omp.h>
+#include <pcl/features/shot_omp.h>
+#include <pcl/features/board.h>
+#include <pcl/recognition/cg/hough_3d.h>
+#include <pcl/recognition/cg/geometric_consistency.h>
 #include <pcl/kdtree/kdtree.h>
+#include <pcl/kdtree/impl/kdtree_flann.hpp>
 #include <pcl/sample_consensus/method_types.h>
 #include <pcl/sample_consensus/model_types.h>
 #include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/segmentation/extract_clusters.h>
 #include <pcl/common/common.h>
 #include <pcl/common/eigen.h>
-#include <pcl/filters/voxel_grid.h>
+#include <pcl/common/transforms.h>
 // OpenCV specific libraries
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
 #include <opencv2/dnn/dnn.hpp>
+#include <image_transport/image_transport.h>
 
 using namespace std;
 using namespace cv;
@@ -40,7 +47,9 @@ using namespace cv;
 ros::Publisher pub;
 ros::Publisher marker_pub;
 
-VideoCapture cap(0, CAP_V4L2); // change to whatever /dev/video[*] your device is on
+//image_transport::Subscriber image_sub;
+image_transport::Publisher image_pub;
+//VideoCapture cap(0, CAP_V4L2); // change to whatever /dev/video[*] your device is on
 
 // Params
 float confThreshold = 0.5;
@@ -58,6 +67,7 @@ vector<String> getOutputsNames(const dnn::Net& net) {
         vector<String> layersNames = net.getLayerNames();
 
         // Get the names of the output layers in names
+        cout << outLayers.size() << endl;
         names.resize(outLayers.size());
         for (size_t i = 0; i < outLayers.size(); ++i) {
             names[i] = layersNames[outLayers[i] - 1];
@@ -71,6 +81,8 @@ void drawPred(int classId, float conf, int left, int top,
         int right, int bottom, Mat& frame, vector<string> classes) {
     // Draw a rectangle displaying the bounding box
     rectangle(frame, Point(left, top), Point(right, bottom), Scalar(0, 0, 255));
+    // Draw small circle around the center
+    circle(frame, Point(right - left, bottom - top), 1, Scalar(0, 0, 255));
 
     // get the label for the class name and its confidence
     string label = format("%.2f", conf);
@@ -132,6 +144,19 @@ tuple<vector<int>, vector<float>, vector<Rect>> getConfidentBoxes(Mat& frame,
     return {classIds, confidences, boxes};
 }
 
+/*pcl::PointCloud<pcl::PointXYZ>::Ptr loadTarget(string targetFileName) {
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
+
+    if (pcl::io::loadPCDFile<pcl::PointXYZ>(targetFileName, *cloud) == -1) {
+        PCL_ERROR("Couldn't read file \n");
+    }
+    cout << "Loaded " 
+              << cloud->width * cloud->height
+              << " data points from " << targetFileName << " with the following fields: "
+              << endl;
+    return cloud;
+}*/
+
 void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
     // Load weights and cfg
     string homedir;
@@ -141,6 +166,9 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
     string weights = homedir + "/catkin_ws/src/tests/new_weights/yolov3-tiny_70000.weights";
     string cfg = homedir + "/catkin_ws/src/tests/yolov3-tiny.cfg";
     string classesFile = homedir + "/catkin_ws/src/tests/objects.names";
+
+    // Load model (of mug)
+    //pcl::PointCloud<pcl::PointXYZ>::Ptr model = loadTarget(homedir + "/catkin_ws/src/tests/model.pcd");
 
     vector<string> classes;
     ifstream ifs(classesFile.c_str());
@@ -156,10 +184,10 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
     // Convert to PCL data type
     pcl_conversions::toPCL(*cloud_msg, *cloud2);
 
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
     pcl::fromPCLPointCloud2(*cloud2, *cloud);
 
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud_filtered(new pcl::PointCloud<pcl::PointXYZRGB>);
 
     float minX = -100.0;
     float minY = -100.0;
@@ -168,31 +196,31 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
     float maxY = 100.0;
     float maxZ = 100.0;
     //cout << minX << minY << minZ << maxX << maxY << maxZ << endl;
-	pcl::CropBox<pcl::PointXYZ> boxFilter;
+	pcl::CropBox<pcl::PointXYZRGB> boxFilter;
     boxFilter.setMin(Eigen::Vector4f(minX, minY, minZ, 1.0));
     boxFilter.setMax(Eigen::Vector4f(maxX, maxY, maxZ, 1.0));
     boxFilter.setInputCloud(cloud);
     //cout << cloud->size() << endl;
     boxFilter.filter(*cloud_filtered);
     // VoxelGrid Filtering 
-    pcl::VoxelGrid<pcl::PointXYZ> sor;
+    pcl::VoxelGrid<pcl::PointXYZRGB> sor;
     sor.setInputCloud(cloud_filtered);
     sor.setLeafSize(0.005, 0.005, 0.005);
     sor.setLeafSize(0.005, 0.005, 0.005);
     sor.filter(*cloud_filtered);
 
     // Create segmentation object for planar model and set params
-    pcl::SACSegmentation<pcl::PointXYZ> seg;
+    pcl::SACSegmentation<pcl::PointXYZRGB> seg;
     pcl::PointIndices::Ptr inliers (new pcl::PointIndices);
     pcl::ModelCoefficients::Ptr coefficients (new pcl::ModelCoefficients);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_plane (new pcl::PointCloud<pcl::PointXYZ> ());
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud_plane (new pcl::PointCloud<pcl::PointXYZRGB>());
     seg.setOptimizeCoefficients (true);
     seg.setModelType (pcl::SACMODEL_PLANE);
     seg.setMethodType (pcl::SAC_RANSAC);
     seg.setMaxIterations (100);
     seg.setDistanceThreshold (0.05);
 
-    int i = 0, nr_points = (int) cloud_filtered->points.size ();
+    int i = 0, nr_points = (int) cloud_filtered->points.size();
     while (cloud_filtered->points.size () > 0.3 * nr_points) {
         // Segment the largest planar compontent from the remaining cloud
         seg.setInputCloud (cloud_filtered);
@@ -204,7 +232,7 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
         }
         
         // Extract the planar inliers from the input cloud
-        pcl::ExtractIndices<pcl::PointXYZ> extract;
+        pcl::ExtractIndices<pcl::PointXYZRGB> extract;
         extract.setInputCloud (cloud_filtered);
         extract.setIndices (inliers);
         extract.setNegative (false);
@@ -222,18 +250,39 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
     }
 
     /* 
-    *** Find YOLOv3 bounding box ***
-    */
+     * Find YOLOv3 bounding box
+     */
 
     // Instantiate frame
-    Mat frame, blob;
-    cap >> frame;
+    Mat blob;
+    Mat frame = Mat(cloud->height, cloud->width, CV_8UC3);
+    //cout << cloud->height << " " << cloud->width << endl;
+    //cout << frame.size() << endl;
+    //cap >> frame;
+    
+    // Convert pcl::PointCloud<pcl::PointXYZRGB> to cv::Mat
+    
+    #pragma omp parallel for
+    for (int y = 0; y < frame.rows; ++y) {
+        for (int x = 0; x < frame.cols; ++x) {
+            pcl::PointXYZRGB point = cloud->at(x, y);
+            if (isfinite(point.x) && isfinite(point.y)) { 
+                frame.at<Vec3b>(y, x)[0] = point.b;
+                frame.at<Vec3b>(y, x)[1] = point.g;
+                frame.at<Vec3b>(y, x)[2] = point.r;
+            } else {
+                frame.at<Vec3b>(y, x)[0] = 0;
+                frame.at<Vec3b>(y, x)[1] = 0;
+                frame.at<Vec3b>(y, x)[2] = 0;
+            }
+        }
+    }
 
     // get the frame from the cap
-    if (!frame.data) cout << "THIS FRAME IS INVALID DAWG" << endl;
-    // else
-    //     cout << "noice" << endl;
-
+    if (!frame.data) cout << "invalid frame" << endl;
+    
+    //imshow("frame", frame);  // show the image inside of it
+    //waitKey(1);
     
     // Read in the net from the darknet cfg and weights files
     dnn::Net net = dnn::readNetFromDarknet(cfg, weights);
@@ -245,7 +294,6 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
     // Get the output
     vector<Mat> outs;
     net.forward(outs, getOutputsNames(net));
-    //cout << outs.size() << endl;
 
     // Get confident boxes
     tuple<vector<int>, vector<float>, vector<Rect>> confident_boxes;
@@ -256,11 +304,16 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
 
     cout << "BOXES: " << boxes.size() << endl;
 
+    //vector<tuple<float, float>> centroids;
     for (i = 0; i < boxes.size(); ++i)
         // Debugging the location of the centroids of any possible boxes
         // TODO: figure out how to convert opencv points to ROS
-        cout << "BOX " << i << ":: x:" << boxes[i].x - boxes[i].width / 2
-            << " y: " << boxes[i].y - boxes[i].height / 2;
+        // NOTE: (0, 0) is in the top left
+        // Convert to relative to middle origin
+        cout << "BOX " << i << ":: x:" << boxes[i].x - (frame.cols / 2)
+            << " y: " << -(boxes[i].y - (frame.rows / 2));
+        //tuple<float, float> centroid = make_tuple(boxes[i].x - (frame.cols / 2), -(boxes[i].y - (frame.rows / 2)));
+        //centroids.push_back(centroid);
     if (boxes.size() > 0) 
         cout << '\n';
     
@@ -269,11 +322,11 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
     waitKey(1);
 
     // Create the KdTree for the search method of the extraction
-    pcl::search::KdTree<pcl::PointXYZ>::Ptr tree (new pcl::search::KdTree<pcl::PointXYZ>);
+    pcl::search::KdTree<pcl::PointXYZRGB>::Ptr tree (new pcl::search::KdTree<pcl::PointXYZRGB>);
     tree->setInputCloud (cloud_filtered);
 
     vector<pcl::PointIndices> cluster_indices;
-    pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
+    pcl::EuclideanClusterExtraction<pcl::PointXYZRGB> ec;
     ec.setClusterTolerance (0.03);
     ec.setMinClusterSize (100);
     ec.setMaxClusterSize (25000);
@@ -281,11 +334,11 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
     ec.setInputCloud (cloud_filtered);
     ec.extract(cluster_indices);
 
-    vector<visualization_msgs::Marker> markers; // Wanna store the markers
+    vector<visualization_msgs::Marker> markers; // Want to store the markers
     int j = 0;
     for (vector<pcl::PointIndices>::const_iterator it = cluster_indices.begin (); it != cluster_indices.end (); it++) {
 
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster (new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud_cluster (new pcl::PointCloud<pcl::PointXYZRGB>);
         
         Eigen::Vector4f centroid;        
         Eigen::Vector4f min;
@@ -294,7 +347,7 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
         int k = 0;
         for (std::vector<int>::const_iterator pit = it->indices.begin (); pit != it->indices.end (); pit++) {
             cloud_cluster->points.push_back (cloud_filtered->points[*pit]);
-            //pcl::PointXYZ p = cloud_filtered->points[*pit];
+            //pcl::PointXYZRGB p = cloud_filtered->points[*pit];
             k++;
         }
 
@@ -360,13 +413,35 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
         j++;
 
     }
-    /*
-    for (i = 0; i < markers.size(); ++i) {
-        x = marker.pose.position.x;
-        y = marker.pose.position.y;
-        z = marker.pose.position.z;
-        if (
-        */
+
+    for (i = 0; i < boxes.size(); ++i) {
+        visualization_msgs::Marker marker;
+
+        marker.header.frame_id = FRAME_ID;
+        marker.header.stamp = ros::Time::now();
+        marker.lifetime = ros::Duration(0.25);
+
+        marker.ns = "the_chosen_one";
+        marker.id = j;
+        marker.type = visualization_msgs::Marker::CUBE;
+
+        marker.pose.position.x = 0.1;
+        marker.pose.position.y = boxes[i].x - (frame.cols / 2);
+        marker.pose.position.z = -(boxes[i].y - (frame.rows / 2));
+        marker.pose.orientation.x = 0.0;
+        marker.pose.orientation.y = 0.0;
+        marker.pose.orientation.z = 0.0;
+        marker.pose.orientation.w = 1.0;
+        marker.scale.x = 0.1;
+        marker.scale.y = boxes[i].width;
+        marker.scale.z = boxes[i].height;
+
+        marker.color.r = 1.0;
+        marker.color.g = 0.0;
+        marker.color.b = 0.0;
+        marker.color.a = 0.3;
+        marker_pub.publish (marker);
+    }
 
     // Convert to ROS data type
     pcl::PCLPointCloud2* cloud_filtered2 = new pcl::PCLPointCloud2;
@@ -381,33 +456,50 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
     pub.publish (output);
 }
 
+void image_cb (const sensor_msgs::ImageConstPtr& image_msg) {
+    //cout << "Hello Friend" << endl;
+    cv_bridge::CvImagePtr cv_ptr;
+    try {
+        cv_ptr = cv_bridge::toCvCopy(image_msg, sensor_msgs::image_encodings::BGR8);
+    } catch (cv_bridge::Exception& e) {
+        ROS_ERROR("cv_bridge exception: %s", e.what());
+        return;
+    }
+    image_pub.publish(cv_ptr->toImageMsg());
+}
+
 int main (int argc, char** argv) {
     // Initialize ROS
     ros::init (argc, argv, "tests");
     ros::NodeHandle nh;
+    image_transport::ImageTransport it(nh);
 
-    if(!cap.open(0))
+    /*if(!cap.open(0))
         cout << "Couldn't open RGB stream" << endl;
     else
-        cout << "Opened RGB stream" << endl;
+        cout << "Opened RGB stream" << endl;*/
     
     // Create a ROS subscriber for the input point cloud
-    ros::Subscriber sub = nh.subscribe ("input", 1, cloud_cb);
+    ros::Subscriber sub_cloud = nh.subscribe ("cloud", 1, cloud_cb);
+    ros::Subscriber sub_image = nh.subscribe ("image", 1, image_cb);
 
     // Create a ROS publisher for the output point cloud
     cout << "Advertising output \n";
     pub = nh.advertise<sensor_msgs::PointCloud2> ("output", 1);
-    //pub = nh.advertise<pcl::PointCloud<pcl::PointXYZ>> ("output", 1);
+    //image_pub = it.advertise("/image_converter/output_video", 1);
+    //pub = nh.advertise<pcl::PointCloud<pcl::PointXYZRGB>> ("output", 1);
     
     // Create marker publisher node
     marker_pub = nh.advertise<visualization_msgs::Marker>("visualization_marker", 1);
 
     // Spin
     ros::spin ();
+    //ros::AsyncSpinner spinner(4);
+    //spinner.start();
+    //ros::waitForShutdown();
 
     // Close everything and exit
-    cap.release();
+    //cap.release();
     destroyAllWindows();
     return(0);
 }
-

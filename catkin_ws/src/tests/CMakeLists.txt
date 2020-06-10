@@ -7,12 +7,18 @@ project(tests)
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
 ## is used, also find other catkin packages
+#set(cv_bridge_DIR /opt/ros/melodic/share/cv_bridge/cmake)
+
+set(OpenCV_DIR /usr/local/share/opencv4)
+find_package(OpenCV 4.3.0 EXACT REQUIRED)
+
 find_package(catkin REQUIRED COMPONENTS
   pcl_conversions
   pcl_ros
   roscpp
   sensor_msgs
-  OpenCV REQUIRED
+  cv_bridge
+  image_transport
 )
 
 ## System dependencies are found with CMake's conventions
@@ -207,4 +213,4 @@ include_directories(
 ## Add folders to be run by python nosetests
 # catkin_add_nosetests(test)
 add_executable(experiments src/experiments.cpp)
-target_link_libraries(experiments ${catkin_LIBRARIES})
+target_link_libraries(experiments ${catkin_LIBRARIES} ${OpenCV_LIBS})

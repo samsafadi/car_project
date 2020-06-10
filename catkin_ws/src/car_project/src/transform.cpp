@@ -20,8 +20,7 @@ using namespace std;
 const string TARGET_FILE_NAME ="/root/catkin_ws/src/car_project/target.pcd";
 
 // load PCD file for target
-pcl::PointCloud<pcl::PointXYZ>::Ptr
-loadTarget(string targetFileName) {
+pcl::PointCloud<pcl::PointXYZ>::Ptr loadTarget(string targetFileName) {
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
 
     if (pcl::io::loadPCDFile<pcl::PointXYZ>(targetFileName, *cloud) == -1) {
@@ -40,8 +39,7 @@ loadTarget(string targetFileName) {
     return cloud;
 }
 
-void
-cloudTransform(const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
+void cloudTransform(const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
     // Container for source and target clouds
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_target = loadTarget(TARGET_FILE_NAME);
     pcl::PCLPointCloud2* cloud_source2 = new pcl::PCLPointCloud2;
@@ -103,8 +101,7 @@ cloudTransform(const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
     cout << "Transformation Matrix: \n" << transformation.format(fmt) << endl;
 }
 
-int
-main (int argc, char** argv) {
+int main (int argc, char** argv) {
    // Initialize ROS
    ros::init (argc, argv, "transform");
    ros::NodeHandle nh;

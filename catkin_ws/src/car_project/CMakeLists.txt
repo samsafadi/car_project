@@ -207,3 +207,5 @@ include_directories(
 # catkin_add_nosetests(test)
 add_executable(transform src/transform.cpp)
 target_link_libraries(transform ${catkin_LIBRARIES})
+add_executable(crop src/crop.cpp)
+target_link_libraries(crop ${catkin_LIBRARIES})
