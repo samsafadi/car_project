@@ -4,3 +4,4 @@ catkin_ws/build
 catkin_ws/devel
 catkin_ws/.vscode
 catkin_ws/out
+catkin_ws/src/test/libtorch

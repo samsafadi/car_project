@@ -44,12 +44,17 @@ using namespace std;
 using namespace cv;
 
 
-ros::Publisher pub;
+ros::Publisher cloud_pub;
+ros::Publisher target_pub;
 ros::Publisher marker_pub;
 
 //image_transport::Subscriber image_sub;
 image_transport::Publisher image_pub;
 //VideoCapture cap(0, CAP_V4L2); // change to whatever /dev/video[*] your device is on
+
+// Shared information
+//cv_bridge::CvImagePtr global_cv_image_ptr = NULL;
+vector<Rect> global_boxes;
 
 // Params
 float confThreshold = 0.5;
@@ -67,7 +72,7 @@ vector<String> getOutputsNames(const dnn::Net& net) {
         vector<String> layersNames = net.getLayerNames();
 
         // Get the names of the output layers in names
-        cout << outLayers.size() << endl;
+        //cout << outLayers.size() << endl;
         names.resize(outLayers.size());
         for (size_t i = 0; i < outLayers.size(); ++i) {
             names[i] = layersNames[outLayers[i] - 1];
@@ -82,7 +87,10 @@ void drawPred(int classId, float conf, int left, int top,
     // Draw a rectangle displaying the bounding box
     rectangle(frame, Point(left, top), Point(right, bottom), Scalar(0, 0, 255));
     // Draw small circle around the center
-    circle(frame, Point(right - left, bottom - top), 1, Scalar(0, 0, 255));
+    //cout << "RIGHT: " << right << "LEFT: " << left << "TOP: " << top << "BOTTOM: " << bottom << endl;
+    int cx = left + ((right - left) / 2);
+    int cy = top + ((bottom - top) / 2);
+    circle(frame, Point(cx, cy), 1, Scalar(0, 0, 255));
 
     // get the label for the class name and its confidence
     string label = format("%.2f", conf);
@@ -118,7 +126,7 @@ tuple<vector<int>, vector<float>, vector<Rect>> getConfidentBoxes(Mat& frame,
             // get the value and location of the maximum score
             minMaxLoc(scores, 0, &confidence, 0, &classIdPoint);
             if (confidence > confThreshold) {
-                cout << confidence << endl;
+                //cout << confidence << endl;
                 int centerX = (int)(data[0] * frame.cols);
                 int centerY = (int)(data[1] * frame.rows);
                 int width = (int)(data[2] * frame.cols);
@@ -158,23 +166,10 @@ tuple<vector<int>, vector<float>, vector<Rect>> getConfidentBoxes(Mat& frame,
 }*/
 
 void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
-    // Load weights and cfg
-    string homedir;
-    if ((homedir = getenv("HOME")) == "") {
-        homedir = getpwuid(getuid())->pw_dir;
-    }
-    string weights = homedir + "/catkin_ws/src/tests/new_weights/yolov3-tiny_70000.weights";
-    string cfg = homedir + "/catkin_ws/src/tests/yolov3-tiny.cfg";
-    string classesFile = homedir + "/catkin_ws/src/tests/objects.names";
-
+    
     // Load model (of mug)
     //pcl::PointCloud<pcl::PointXYZ>::Ptr model = loadTarget(homedir + "/catkin_ws/src/tests/model.pcd");
-
-    vector<string> classes;
-    ifstream ifs(classesFile.c_str());
-    string line;
-    while (getline(ifs, line)) classes.push_back(line);
-
+    
     // Container for original and filtered data
     pcl::PCLPointCloud2* cloud2 = new pcl::PCLPointCloud2;
     pcl::PCLPointCloud2ConstPtr cloudPtr(cloud2);
@@ -218,7 +213,7 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
     seg.setModelType (pcl::SACMODEL_PLANE);
     seg.setMethodType (pcl::SAC_RANSAC);
     seg.setMaxIterations (100);
-    seg.setDistanceThreshold (0.05);
+    seg.setDistanceThreshold (0.02);
 
     int i = 0, nr_points = (int) cloud_filtered->points.size();
     while (cloud_filtered->points.size () > 0.3 * nr_points) {
@@ -230,7 +225,7 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
         seg.segment (*inliers, *coefficients);
             break;
         }
-        
+
         // Extract the planar inliers from the input cloud
         pcl::ExtractIndices<pcl::PointXYZRGB> extract;
         extract.setInputCloud (cloud_filtered);
@@ -244,82 +239,9 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
         // Remove the planar inliers, extract the rest
         extract.setNegative (true);
         extract.filter (*cloud_filtered);
-        //cout << "cloud_filtered size: " << cloud_filtered->size () << endl;
-        
+
         ++i;
     }
-
-    /* 
-     * Find YOLOv3 bounding box
-     */
-
-    // Instantiate frame
-    Mat blob;
-    Mat frame = Mat(cloud->height, cloud->width, CV_8UC3);
-    //cout << cloud->height << " " << cloud->width << endl;
-    //cout << frame.size() << endl;
-    //cap >> frame;
-    
-    // Convert pcl::PointCloud<pcl::PointXYZRGB> to cv::Mat
-    
-    #pragma omp parallel for
-    for (int y = 0; y < frame.rows; ++y) {
-        for (int x = 0; x < frame.cols; ++x) {
-            pcl::PointXYZRGB point = cloud->at(x, y);
-            if (isfinite(point.x) && isfinite(point.y)) { 
-                frame.at<Vec3b>(y, x)[0] = point.b;
-                frame.at<Vec3b>(y, x)[1] = point.g;
-                frame.at<Vec3b>(y, x)[2] = point.r;
-            } else {
-                frame.at<Vec3b>(y, x)[0] = 0;
-                frame.at<Vec3b>(y, x)[1] = 0;
-                frame.at<Vec3b>(y, x)[2] = 0;
-            }
-        }
-    }
-
-    // get the frame from the cap
-    if (!frame.data) cout << "invalid frame" << endl;
-    
-    //imshow("frame", frame);  // show the image inside of it
-    //waitKey(1);
-    
-    // Read in the net from the darknet cfg and weights files
-    dnn::Net net = dnn::readNetFromDarknet(cfg, weights);
-    dnn::blobFromImage(frame, blob, 1/255.0, Size(inpWidth, inpHeight), Scalar(0,0,0), true, false);
-
-    // Set the input
-    net.setInput(blob);
-    
-    // Get the output
-    vector<Mat> outs;
-    net.forward(outs, getOutputsNames(net));
-
-    // Get confident boxes
-    tuple<vector<int>, vector<float>, vector<Rect>> confident_boxes;
-    confident_boxes = getConfidentBoxes(frame, outs, classes);
-    
-    vector<Rect> boxes = get<2>(confident_boxes);
-    vector<float> confidences = get<1>(confident_boxes);
-
-    cout << "BOXES: " << boxes.size() << endl;
-
-    //vector<tuple<float, float>> centroids;
-    for (i = 0; i < boxes.size(); ++i)
-        // Debugging the location of the centroids of any possible boxes
-        // TODO: figure out how to convert opencv points to ROS
-        // NOTE: (0, 0) is in the top left
-        // Convert to relative to middle origin
-        cout << "BOX " << i << ":: x:" << boxes[i].x - (frame.cols / 2)
-            << " y: " << -(boxes[i].y - (frame.rows / 2));
-        //tuple<float, float> centroid = make_tuple(boxes[i].x - (frame.cols / 2), -(boxes[i].y - (frame.rows / 2)));
-        //centroids.push_back(centroid);
-    if (boxes.size() > 0) 
-        cout << '\n';
-    
-    // show the image
-    imshow("frame", frame);  // show the image inside of it
-    waitKey(1);
 
     // Create the KdTree for the search method of the extraction
     pcl::search::KdTree<pcl::PointXYZRGB>::Ptr tree (new pcl::search::KdTree<pcl::PointXYZRGB>);
@@ -327,13 +249,14 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
 
     vector<pcl::PointIndices> cluster_indices;
     pcl::EuclideanClusterExtraction<pcl::PointXYZRGB> ec;
-    ec.setClusterTolerance (0.03);
+    ec.setClusterTolerance (0.04);
     ec.setMinClusterSize (100);
     ec.setMaxClusterSize (25000);
     ec.setSearchMethod (tree);
     ec.setInputCloud (cloud_filtered);
     ec.extract(cluster_indices);
 
+    vector<Rect> boxes = global_boxes;
     vector<visualization_msgs::Marker> markers; // Want to store the markers
     int j = 0;
     for (vector<pcl::PointIndices>::const_iterator it = cluster_indices.begin (); it != cluster_indices.end (); it++) {
@@ -361,24 +284,11 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
         visualization_msgs::Marker marker;
         marker.header.frame_id = FRAME_ID;
         marker.header.stamp = ros::Time::now();
-        marker.lifetime = ros::Duration(0.25);
+        marker.lifetime = ros::Duration(2.0);
 
         marker.ns = "euclidean_clusters";
         marker.id = j;
         marker.type = visualization_msgs::Marker::CUBE;
-
-        /*cout << "Centroid: (" <<
-        centroid[0] << "," <<
-        centroid[1] << "," <<
-        centroid[2] << 
-        ") Min: (" <<
-        min[0] << "," <<
-        min[1] << "," <<
-        min[2] <<
-        ") Max: (" <<
-        max[0] << "," <<
-        max[1] << "," <<
-        max[2] << ")" << endl;*/
 
         marker.pose.position.x = centroid[0];
         marker.pose.position.y = centroid[1];
@@ -401,47 +311,80 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
         if (marker.scale.z == 0)
             marker.scale.z = 0.1;
 
-        marker.color.r = 0.0;
-        marker.color.g = 1.0;
-        marker.color.b = 0.0;
-        marker.color.a = 0.3;
+        bool contains_centroid = false;
+        for (int b = 0; b < boxes.size(); ++b) {
+            Rect box = boxes[b];
+            int cx = box.x + (box.width / 2);
+            int cy = box.y + (box.height / 2);
+            pcl::PointXYZRGB p = cloud->at(cx, cy);
+            //cout << p.x << " " << p.y << " " << p.z << " " << endl;
 
+            //cout << "CX: " << cx << " CY: " << cy << " MAX_X: " << max[0] << 
+            //    " MIN_X: " << min[0] << " MAX_Y: " << max[1] << " MIN_Y: " << min[1]<< endl;
+
+            if (p.x <= max[0] && p.x >= min[0] && p.y <= max[1] && p.y >= min[1])
+                contains_centroid = true;
+        }
+        if (contains_centroid == true) {
+            marker.color.r = 1.0;
+            marker.color.g = 0.0;
+            marker.color.b = 0.0;
+            marker.color.a = 0.3;
+        } else {
+            marker.color.r = 0.0;
+            marker.color.g = 1.0;
+            marker.color.b = 0.0;
+            marker.color.a = 0.3;
+        }
+
+        if (contains_centroid) {
+            pcl::PointCloud<pcl::PointXYZRGB>::Ptr target_pc(new pcl::PointCloud<pcl::PointXYZRGB>);
+            pcl::CropBox<pcl::PointXYZRGB> targetFilter;
+            targetFilter.setMin(Eigen::Vector4f(min[0], min[1], min[2], 1.0));
+            targetFilter.setMax(Eigen::Vector4f(max[0], max[1], max[2], 1.0));
+            targetFilter.setInputCloud(cloud_filtered);
+            targetFilter.filter(*target_pc);
+            target_pub.publish(target_pc);
+        }
+            
+        marker_pub.publish(marker);
         markers.push_back (marker);
-        marker_pub.publish (marker);
-
-        //std::cout << "PointCloud representing the Cluster: " << cloud_cluster->points.size () << " data points." << std::endl;
         j++;
 
     }
 
-    for (i = 0; i < boxes.size(); ++i) {
-        visualization_msgs::Marker marker;
+    //vector<Rect> boxes = global_boxes;
+    /*
+    if (boxes.size() > 0) {
+        for (j = 0; j < markers.size(); ++j) {
+            visualization_msgs::Marker marker;
 
-        marker.header.frame_id = FRAME_ID;
-        marker.header.stamp = ros::Time::now();
-        marker.lifetime = ros::Duration(0.25);
+            marker.header.frame_id = FRAME_ID;
+            marker.header.stamp = ros::Time::now();
+            marker.lifetime = ros::Duration(0.25);
 
-        marker.ns = "the_chosen_one";
-        marker.id = j;
-        marker.type = visualization_msgs::Marker::CUBE;
+            marker.ns = "the_chosen_one";
+            marker.id = j;
+            marker.type = visualization_msgs::Marker::CUBE;
 
-        marker.pose.position.x = 0.1;
-        marker.pose.position.y = boxes[i].x - (frame.cols / 2);
-        marker.pose.position.z = -(boxes[i].y - (frame.rows / 2));
-        marker.pose.orientation.x = 0.0;
-        marker.pose.orientation.y = 0.0;
-        marker.pose.orientation.z = 0.0;
-        marker.pose.orientation.w = 1.0;
-        marker.scale.x = 0.1;
-        marker.scale.y = boxes[i].width;
-        marker.scale.z = boxes[i].height;
+            marker.pose.position.x = 0.1;
+            marker.pose.position.y = boxes[i].x - (frame.cols / 2);
+            marker.pose.position.z = -(boxes[i].y - (frame.rows / 2));
+            marker.pose.orientation.x = 0.0;
+            marker.pose.orientation.y = 0.0;
+            marker.pose.orientation.z = 0.0;
+            marker.pose.orientation.w = 1.0;
+            marker.scale.x = 0.1;
+            marker.scale.y = boxes[i].width;
+            marker.scale.z = boxes[i].height;
 
-        marker.color.r = 1.0;
-        marker.color.g = 0.0;
-        marker.color.b = 0.0;
-        marker.color.a = 0.3;
-        marker_pub.publish (marker);
-    }
+            marker.color.r = 1.0;
+            marker.color.g = 0.0;
+            marker.color.b = 0.0;
+            marker.color.a = 0.3;
+            marker_pub.publish (marker);
+        }
+    }*/
 
     // Convert to ROS data type
     pcl::PCLPointCloud2* cloud_filtered2 = new pcl::PCLPointCloud2;
@@ -453,11 +396,11 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
     //cout << output.size() << endl;
 
     // Publish the data
-    pub.publish (output);
+    cloud_pub.publish (output);
 }
 
 void image_cb (const sensor_msgs::ImageConstPtr& image_msg) {
-    //cout << "Hello Friend" << endl;
+
     cv_bridge::CvImagePtr cv_ptr;
     try {
         cv_ptr = cv_bridge::toCvCopy(image_msg, sensor_msgs::image_encodings::BGR8);
@@ -465,6 +408,57 @@ void image_cb (const sensor_msgs::ImageConstPtr& image_msg) {
         ROS_ERROR("cv_bridge exception: %s", e.what());
         return;
     }
+
+    string homedir;
+    if ((homedir = getenv("HOME")) == "") {
+        homedir = getpwuid(getuid())->pw_dir;
+    }
+    string weights = homedir + "/catkin_ws/src/tests/yolov4-custom_last.weights";
+    string cfg = homedir + "/catkin_ws/src/tests/yolov4-custom.cfg";
+    string classesFile = homedir + "/catkin_ws/src/tests/objects.names";
+
+    vector<string> classes;
+    ifstream ifs(classesFile.c_str());
+    string line;
+    while (getline(ifs, line)) classes.push_back(line);
+
+    Mat blob;
+
+    dnn::Net net = dnn::readNetFromDarknet(cfg, weights);
+    dnn::blobFromImage(cv_ptr->image, blob, 1/255.0, Size(inpWidth, inpHeight), Scalar(0,0,0), true, false);
+
+    // Set the input
+    net.setInput(blob);
+    
+    // Get the output
+    vector<Mat> outs;
+    net.forward(outs, getOutputsNames(net));
+    
+
+    // Get confident boxes
+    tuple<vector<int>, vector<float>, vector<Rect>> confident_boxes;
+    confident_boxes = getConfidentBoxes(cv_ptr->image, outs, classes);
+    
+    vector<Rect> boxes = get<2>(confident_boxes);
+    vector<float> confidences = get<1>(confident_boxes);
+
+    //cout << "BOXES: " << boxes.size() << endl;
+
+    for (int i = 0; i < boxes.size(); ++i)
+        // Debugging the location of the centroids of any possible boxes
+        // TODO: figure out how to convert opencv points to ROS
+        // NOTE: (0, 0) is in the top left
+        // Convert to relative to middle origin
+        cout << "BOX " << i << ":: x:" << boxes[i].x
+            << " y: " << boxes[i].y;
+    if (boxes.size() > 0) 
+        cout << '\n';
+    
+    // show the image
+    //imshow("image", cv_ptr->image);  // show the image inside of it
+    //waitKey(1);
+    //global_cv_image_ptr = cv_ptr;
+    global_boxes = boxes;
     image_pub.publish(cv_ptr->toImageMsg());
 }
 
@@ -485,8 +479,9 @@ int main (int argc, char** argv) {
 
     // Create a ROS publisher for the output point cloud
     cout << "Advertising output \n";
-    pub = nh.advertise<sensor_msgs::PointCloud2> ("output", 1);
-    //image_pub = it.advertise("/image_converter/output_video", 1);
+    cloud_pub = nh.advertise<sensor_msgs::PointCloud2> ("output/cloud", 1);
+    target_pub = nh.advertise<sensor_msgs::PointCloud2> ("output/target", 1);
+    image_pub = it.advertise("/image_converter/output_video", 1);
     //pub = nh.advertise<pcl::PointCloud<pcl::PointXYZRGB>> ("output", 1);
     
     // Create marker publisher node

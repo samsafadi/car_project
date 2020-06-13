@@ -10,8 +10,9 @@ project(tests)
 #set(cv_bridge_DIR /opt/ros/melodic/share/cv_bridge/cmake)
 
 set(OpenCV_DIR /usr/local/share/opencv4)
+set(Torch_DIR ./libtorch/share/cmake/Torch)
 find_package(OpenCV 4.3.0 EXACT REQUIRED)
-
+#find_package(Torch REQUIRED)
 find_package(catkin REQUIRED COMPONENTS
   pcl_conversions
   pcl_ros
