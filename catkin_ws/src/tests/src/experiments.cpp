@@ -23,6 +23,7 @@
 #include <pcl/features/normal_3d_omp.h>
 #include <pcl/features/shot_omp.h>
 #include <pcl/features/board.h>
+#include <pcl/registration/icp.h>
 #include <pcl/recognition/cg/hough_3d.h>
 #include <pcl/recognition/cg/geometric_consistency.h>
 #include <pcl/kdtree/kdtree.h>
@@ -46,14 +47,13 @@ using namespace cv;
 
 ros::Publisher cloud_pub;
 ros::Publisher target_pub;
+ros::Publisher icp_pub;
+ros::Publisher model_pub;
 ros::Publisher marker_pub;
 
-//image_transport::Subscriber image_sub;
 image_transport::Publisher image_pub;
-//VideoCapture cap(0, CAP_V4L2); // change to whatever /dev/video[*] your device is on
 
 // Shared information
-//cv_bridge::CvImagePtr global_cv_image_ptr = NULL;
 vector<Rect> global_boxes;
 
 // Params
@@ -119,6 +119,7 @@ tuple<vector<int>, vector<float>, vector<Rect>> getConfidentBoxes(Mat& frame,
         float* data = (float*)outs[i].data;
         //cout << "OUTS ROWS: " << outs[i].rows << endl;
 
+#pragma omp parallel for
         for (int j = 0; j < outs[i].rows; ++j, data += outs[i].cols) {
             Mat scores = outs[i].row(j).colRange(5, outs[i].cols);
             Point classIdPoint;
@@ -152,23 +153,16 @@ tuple<vector<int>, vector<float>, vector<Rect>> getConfidentBoxes(Mat& frame,
     return {classIds, confidences, boxes};
 }
 
-/*pcl::PointCloud<pcl::PointXYZ>::Ptr loadTarget(string targetFileName) {
-    pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
+pcl::PointCloud<pcl::PointXYZ>::Ptr loadTarget(string targetFileName) {
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
 
     if (pcl::io::loadPCDFile<pcl::PointXYZ>(targetFileName, *cloud) == -1) {
         PCL_ERROR("Couldn't read file \n");
     }
-    cout << "Loaded " 
-              << cloud->width * cloud->height
-              << " data points from " << targetFileName << " with the following fields: "
-              << endl;
     return cloud;
-}*/
+}
 
 void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
-    
-    // Load model (of mug)
-    //pcl::PointCloud<pcl::PointXYZ>::Ptr model = loadTarget(homedir + "/catkin_ws/src/tests/model.pcd");
     
     // Container for original and filtered data
     pcl::PCLPointCloud2* cloud2 = new pcl::PCLPointCloud2;
@@ -200,7 +194,6 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
     // VoxelGrid Filtering 
     pcl::VoxelGrid<pcl::PointXYZRGB> sor;
     sor.setInputCloud(cloud_filtered);
-    sor.setLeafSize(0.005, 0.005, 0.005);
     sor.setLeafSize(0.005, 0.005, 0.005);
     sor.filter(*cloud_filtered);
 
@@ -258,6 +251,9 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
 
     vector<Rect> boxes = global_boxes;
     vector<visualization_msgs::Marker> markers; // Want to store the markers
+    bool target_found = false; // To indicate to if we can do icp
+    pcl::PointCloud<pcl::PointXYZ>::Ptr target_pc(new pcl::PointCloud<pcl::PointXYZ>); // For icp if we find a target
+
     int j = 0;
     for (vector<pcl::PointIndices>::const_iterator it = cluster_indices.begin (); it != cluster_indices.end (); it++) {
 
@@ -323,7 +319,7 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
             //    " MIN_X: " << min[0] << " MAX_Y: " << max[1] << " MIN_Y: " << min[1]<< endl;
 
             if (p.x <= max[0] && p.x >= min[0] && p.y <= max[1] && p.y >= min[1])
-                contains_centroid = true;
+                contains_centroid = true, target_found = true;
         }
         if (contains_centroid == true) {
             marker.color.r = 1.0;
@@ -338,11 +334,13 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
         }
 
         if (contains_centroid) {
-            pcl::PointCloud<pcl::PointXYZRGB>::Ptr target_pc(new pcl::PointCloud<pcl::PointXYZRGB>);
-            pcl::CropBox<pcl::PointXYZRGB> targetFilter;
+            pcl::CropBox<pcl::PointXYZ> targetFilter;
+            pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered_xyz (new pcl::PointCloud<pcl::PointXYZ>);
+            pcl::copyPointCloud(*cloud_filtered, *cloud_filtered_xyz);
+
             targetFilter.setMin(Eigen::Vector4f(min[0], min[1], min[2], 1.0));
             targetFilter.setMax(Eigen::Vector4f(max[0], max[1], max[2], 1.0));
-            targetFilter.setInputCloud(cloud_filtered);
+            targetFilter.setInputCloud(cloud_filtered_xyz);
             targetFilter.filter(*target_pc);
             target_pub.publish(target_pc);
         }
@@ -352,39 +350,55 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
         j++;
 
     }
-
-    //vector<Rect> boxes = global_boxes;
+    
     /*
-    if (boxes.size() > 0) {
-        for (j = 0; j < markers.size(); ++j) {
-            visualization_msgs::Marker marker;
+     *  If we have a centroid, we want to compute the difference between the target and the model
+     */
 
-            marker.header.frame_id = FRAME_ID;
-            marker.header.stamp = ros::Time::now();
-            marker.lifetime = ros::Duration(0.25);
+    // Load model (of mug)
+    string homedir;
+    if ((homedir = getenv("HOME")) == "") {
+        homedir = getpwuid(getuid())->pw_dir;
+    }
+    pcl::PointCloud<pcl::PointXYZ>::Ptr model = loadTarget(homedir + "/catkin_ws/src/tests/model.pcd");
 
-            marker.ns = "the_chosen_one";
-            marker.id = j;
-            marker.type = visualization_msgs::Marker::CUBE;
+    pcl::VoxelGrid<pcl::PointXYZ> sor2;
+    sor2.setInputCloud(model);
+    sor2.setLeafSize(0.005, 0.005, 0.005);
+    sor2.filter(*model);
+    
+    if (target_found) {
+        pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
+        pcl::PointCloud<pcl::PointXYZ> icp_aligned;
+        icp.setInputSource(target_pc);
+        icp.setInputTarget(model);
+         
+        // Set the max correspondence distance to 5cm (e.g., correspondences with higher distances will be ignored)
+        icp.setMaxCorrespondenceDistance(0.5);
+        // Set the maximum number of iterations (criterion 1)
+        icp.setMaximumIterations(50);
+        // Set the transformation epsilon (criterion 2)
+        icp.setTransformationEpsilon(1e-8);
+        // Set the euclidean distance difference epsilon (criterion 3)
+        icp.setEuclideanFitnessEpsilon(1);
+         
+        // Perform the alignment
+        icp.align (icp_aligned);
+        icp_pub.publish (icp_aligned);
+        sensor_msgs::PointCloud2 model2_ros;
+        pcl::PCLPointCloud2* model2 = new pcl::PCLPointCloud2;
 
-            marker.pose.position.x = 0.1;
-            marker.pose.position.y = boxes[i].x - (frame.cols / 2);
-            marker.pose.position.z = -(boxes[i].y - (frame.rows / 2));
-            marker.pose.orientation.x = 0.0;
-            marker.pose.orientation.y = 0.0;
-            marker.pose.orientation.z = 0.0;
-            marker.pose.orientation.w = 1.0;
-            marker.scale.x = 0.1;
-            marker.scale.y = boxes[i].width;
-            marker.scale.z = boxes[i].height;
-
-            marker.color.r = 1.0;
-            marker.color.g = 0.0;
-            marker.color.b = 0.0;
-            marker.color.a = 0.3;
-            marker_pub.publish (marker);
-        }
-    }*/
+        pcl::toPCLPointCloud2(*model, *model2);
+        pcl_conversions::fromPCL(*model2, model2_ros);
+        model2_ros.header.frame_id = FRAME_ID;
+        model2_ros.header.stamp = ros::Time::now();
+        model_pub.publish (model2_ros);
+        
+        // Obtain the transformation that aligned cloud_source to cloud_source_registered
+        Eigen::Matrix4f transformation = icp.getFinalTransformation();
+        const Eigen::IOFormat fmt(4, 0, ", ", "\n", "[", "]");
+        cout << "Transformation Matrix: \n" << transformation.format(fmt) << endl;
+    }
 
     // Convert to ROS data type
     pcl::PCLPointCloud2* cloud_filtered2 = new pcl::PCLPointCloud2;
@@ -393,7 +407,6 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
     pcl_conversions::fromPCL(*cloud_filtered2, output);
     output.header.frame_id = FRAME_ID;
     output.header.stamp = ros::Time::now();
-    //cout << output.size() << endl;
 
     // Publish the data
     cloud_pub.publish (output);
@@ -433,7 +446,6 @@ void image_cb (const sensor_msgs::ImageConstPtr& image_msg) {
     // Get the output
     vector<Mat> outs;
     net.forward(outs, getOutputsNames(net));
-    
 
     // Get confident boxes
     tuple<vector<int>, vector<float>, vector<Rect>> confident_boxes;
@@ -442,22 +454,16 @@ void image_cb (const sensor_msgs::ImageConstPtr& image_msg) {
     vector<Rect> boxes = get<2>(confident_boxes);
     vector<float> confidences = get<1>(confident_boxes);
 
-    //cout << "BOXES: " << boxes.size() << endl;
-
+#pragma omp parallel for
     for (int i = 0; i < boxes.size(); ++i)
-        // Debugging the location of the centroids of any possible boxes
-        // TODO: figure out how to convert opencv points to ROS
-        // NOTE: (0, 0) is in the top left
-        // Convert to relative to middle origin
         cout << "BOX " << i << ":: x:" << boxes[i].x
-            << " y: " << boxes[i].y;
+            << " y: " << boxes[i].y << " ";
     if (boxes.size() > 0) 
         cout << '\n';
     
     // show the image
     //imshow("image", cv_ptr->image);  // show the image inside of it
     //waitKey(1);
-    //global_cv_image_ptr = cv_ptr;
     global_boxes = boxes;
     image_pub.publish(cv_ptr->toImageMsg());
 }
@@ -468,11 +474,6 @@ int main (int argc, char** argv) {
     ros::NodeHandle nh;
     image_transport::ImageTransport it(nh);
 
-    /*if(!cap.open(0))
-        cout << "Couldn't open RGB stream" << endl;
-    else
-        cout << "Opened RGB stream" << endl;*/
-    
     // Create a ROS subscriber for the input point cloud
     ros::Subscriber sub_cloud = nh.subscribe ("cloud", 1, cloud_cb);
     ros::Subscriber sub_image = nh.subscribe ("image", 1, image_cb);
@@ -481,20 +482,20 @@ int main (int argc, char** argv) {
     cout << "Advertising output \n";
     cloud_pub = nh.advertise<sensor_msgs::PointCloud2> ("output/cloud", 1);
     target_pub = nh.advertise<sensor_msgs::PointCloud2> ("output/target", 1);
+    icp_pub = nh.advertise<sensor_msgs::PointCloud2> ("output/icp", 1);
+    model_pub = nh.advertise<sensor_msgs::PointCloud2> ("output/model", 1);
     image_pub = it.advertise("/image_converter/output_video", 1);
-    //pub = nh.advertise<pcl::PointCloud<pcl::PointXYZRGB>> ("output", 1);
     
     // Create marker publisher node
     marker_pub = nh.advertise<visualization_msgs::Marker>("visualization_marker", 1);
 
     // Spin
-    ros::spin ();
-    //ros::AsyncSpinner spinner(4);
-    //spinner.start();
-    //ros::waitForShutdown();
+    //ros::spin ();
+    ros::AsyncSpinner spinner(4);
+    spinner.start();
+    ros::waitForShutdown();
 
     // Close everything and exit
-    //cap.release();
     destroyAllWindows();
     return(0);
 }
