@@ -17,14 +17,11 @@
 
 using namespace std;
 
-const string TARGET_FILE_NAME ="/root/catkin_ws/src/car_project/target.pcd";
-const string OUTPUT_FILE_NAME ="/root/catkin_ws/src/car_project/target_cropped.pcd";
-
 // load PCD file for target
-pcl::PointCloud<pcl::PointXYZ>::Ptr loadTarget(string targetFileName) {
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+pcl::PointCloud<pcl::PointXYZRGB>::Ptr loadTarget(string targetFileName) {
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
 
-    if (pcl::io::loadPCDFile<pcl::PointXYZ>(targetFileName, *cloud) == -1) {
+    if (pcl::io::loadPCDFile<pcl::PointXYZRGB>(targetFileName, *cloud) == -1) {
         PCL_ERROR("Couldn't read file \n");
     }
     cout << "Loaded " 
@@ -36,22 +33,25 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr loadTarget(string targetFileName) {
 
 int main (int argc, char** argv) {
     // Container for source and target clouds
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = loadTarget(TARGET_FILE_NAME);
-    pcl::CropBox<pcl::PointXYZ> boxFilter;
+    char* input = argv[1];
+    char* output = argv[2];
 
-    float minX = -0.75;
-    float minY = -0.75;
-    float minZ = -0.75;
-    float maxX = 0.75;
-    float maxY = 0.75;
-    float maxZ = 0.75;
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud = loadTarget(input);
+    pcl::CropBox<pcl::PointXYZRGB> boxFilter;
+
+    float minX = -0.3;
+    float minY = -0.3;
+    float minZ = -0.25;
+    float maxX = 0.3;
+    float maxY = 0.3;
+    float maxZ = 0.27;
 
     boxFilter.setMin(Eigen::Vector4f(minX, minY, minZ, 1.0));
     boxFilter.setMax(Eigen::Vector4f(maxX, maxY, maxZ, 1.0));
     boxFilter.setInputCloud(cloud);
     boxFilter.filter(*cloud);
 
-    pcl::io::savePCDFileASCII(OUTPUT_FILE_NAME, *cloud);
+    pcl::io::savePCDFileASCII(output, *cloud);
     cout << "Saved PCD File" << endl;
     return(0);
 }

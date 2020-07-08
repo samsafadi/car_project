@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 2.8.3)
 project(tests)
 
 ## Compile as C++11, supported in ROS Kinetic and newer
-# add_compile_options(-std=c++11)
+add_compile_options(-std=c++14)
 
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
@@ -10,9 +10,11 @@ project(tests)
 #set(cv_bridge_DIR /opt/ros/melodic/share/cv_bridge/cmake)
 
 set(OpenCV_DIR /usr/local/share/opencv4)
-set(Torch_DIR ./libtorch/share/cmake/Torch)
+#set(Torch_DIR ./libtorch/share/cmake/Torch)
+set(PCL_DIR /usr/local/share/pcl-1.10)
 find_package(OpenCV 4.3.0 EXACT REQUIRED)
 #find_package(Torch REQUIRED)
+find_package(PCL 1.10.1 EXACT REQUIRED)
 find_package(catkin REQUIRED COMPONENTS
   pcl_conversions
   pcl_ros
@@ -126,6 +128,7 @@ catkin_package(
 ## Your package locations should be listed before other locations
 include_directories(
 # include
+  ${PCL_INCLUDE_DIRS}
   ${catkin_INCLUDE_DIRS}
 )
 
@@ -214,4 +217,4 @@ include_directories(
 ## Add folders to be run by python nosetests
 # catkin_add_nosetests(test)
 add_executable(experiments src/experiments.cpp)
-target_link_libraries(experiments ${catkin_LIBRARIES} ${OpenCV_LIBS})
+target_link_libraries(experiments ${catkin_LIBRARIES} ${OpenCV_LIBS} ${PCL_LIBRARIES})

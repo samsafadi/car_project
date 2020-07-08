@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 2.8.3)
 project(car_project)
 
 ## Compile as C++11, supported in ROS Kinetic and newer
-# add_compile_options(-std=c++11)
+add_compile_options(-std=c++11)
 
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
@@ -209,3 +209,5 @@ add_executable(transform src/transform.cpp)
 target_link_libraries(transform ${catkin_LIBRARIES})
 add_executable(crop src/crop.cpp)
 target_link_libraries(crop ${catkin_LIBRARIES})
+add_executable(process_pcd src/process_pcd.cpp)
+target_link_libraries(process_pcd ${catkin_LIBRARIES})

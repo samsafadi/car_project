@@ -9,23 +9,25 @@
 // PCL specific libraries
 #include <sensor_msgs/PointCloud2.h>
 #include <sensor_msgs/PointCloud.h>
-#include "pcl_ros/point_cloud.h"
-#include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
-#include <pcl/io/pcd_io.h>
+#include <pcl_ros/point_cloud.h>
+#include <boost/make_shared.hpp>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include <pcl/point_representation.h>
+#include <pcl/io/pcd_io.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/filters/crop_box.h>
 #include <pcl/filters/uniform_sampling.h>
 #include <pcl/filters/extract_indices.h>
-#include <pcl/ModelCoefficients.h>
+#include <pcl/features/fpfh_omp.h>
 #include <pcl/features/normal_3d_omp.h>
-#include <pcl/features/shot_omp.h>
-#include <pcl/features/board.h>
-#include <pcl/registration/icp.h>
-#include <pcl/recognition/cg/hough_3d.h>
-#include <pcl/recognition/cg/geometric_consistency.h>
+#include <pcl/registration/icp_nl.h>
+#include <pcl/registration/transforms.h>
+#include <pcl/registration/correspondence_estimation.h>
+#include <pcl/registration/correspondence_rejection_sample_consensus.h>
+#include <pcl/registration/sample_consensus_prerejective.h>
+#include <pcl/registration/transformation_estimation_svd.h>
 #include <pcl/kdtree/kdtree.h>
 #include <pcl/kdtree/impl/kdtree_flann.hpp>
 #include <pcl/sample_consensus/method_types.h>
@@ -35,20 +37,30 @@
 #include <pcl/common/common.h>
 #include <pcl/common/eigen.h>
 #include <pcl/common/transforms.h>
+#include <pcl/common/centroid.h>
 // OpenCV specific libraries
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
+#include <opencv2/core.hpp>
 #include <opencv2/dnn/dnn.hpp>
 #include <image_transport/image_transport.h>
 
 using namespace std;
 using namespace cv;
 
+typedef pcl::PointNormal PointNT;
+typedef pcl::PointXYZRGBNormal PointRGBNT;
+typedef pcl::FPFHSignature33 FeatureT;
+typedef pcl::FPFHEstimationOMP<pcl::PointXYZRGB,pcl::Normal,FeatureT> FeatureEstimationT;
+typedef pcl::SHOT352 SHOTFT;
+typedef pcl::ReferenceFrame RFType;
+//typedef pcl::SHOTEstimationOMP<pcl::PointWithScale,pcl::Normal,SHOTFT> SHOTEstimationT;
 
 ros::Publisher cloud_pub;
 ros::Publisher target_pub;
-ros::Publisher icp_pub;
+ros::Publisher transform_pub;
 ros::Publisher model_pub;
+ros::Publisher keypoints_pub;
 ros::Publisher marker_pub;
 
 image_transport::Publisher image_pub;
@@ -61,6 +73,7 @@ float confThreshold = 0.5;
 float nmsThreshold = 0.4;
 int inpWidth = 416;
 int inpHeight = 416;
+float leaf = 0.003; // This is also the model resolution
 
 vector<String> getOutputsNames(const dnn::Net& net) {
     static vector<String> names;
@@ -153,10 +166,10 @@ tuple<vector<int>, vector<float>, vector<Rect>> getConfidentBoxes(Mat& frame,
     return {classIds, confidences, boxes};
 }
 
-pcl::PointCloud<pcl::PointXYZ>::Ptr loadTarget(string targetFileName) {
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+pcl::PointCloud<pcl::PointXYZRGB>::Ptr loadTarget(string targetFileName) {
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
 
-    if (pcl::io::loadPCDFile<pcl::PointXYZ>(targetFileName, *cloud) == -1) {
+    if (pcl::io::loadPCDFile<pcl::PointXYZRGB>(targetFileName, *cloud) == -1) {
         PCL_ERROR("Couldn't read file \n");
     }
     return cloud;
@@ -194,7 +207,7 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
     // VoxelGrid Filtering 
     pcl::VoxelGrid<pcl::PointXYZRGB> sor;
     sor.setInputCloud(cloud_filtered);
-    sor.setLeafSize(0.005, 0.005, 0.005);
+    sor.setLeafSize(leaf, leaf, leaf);
     sor.filter(*cloud_filtered);
 
     // Create segmentation object for planar model and set params
@@ -242,7 +255,7 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
 
     vector<pcl::PointIndices> cluster_indices;
     pcl::EuclideanClusterExtraction<pcl::PointXYZRGB> ec;
-    ec.setClusterTolerance (0.04);
+    ec.setClusterTolerance (0.05);
     ec.setMinClusterSize (100);
     ec.setMaxClusterSize (25000);
     ec.setSearchMethod (tree);
@@ -253,6 +266,7 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
     vector<visualization_msgs::Marker> markers; // Want to store the markers
     bool target_found = false; // To indicate to if we can do icp
     pcl::PointCloud<pcl::PointXYZ>::Ptr target_pc(new pcl::PointCloud<pcl::PointXYZ>); // For icp if we find a target
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr object_rgb (new pcl::PointCloud<pcl::PointXYZRGB>);
 
     int j = 0;
     for (vector<pcl::PointIndices>::const_iterator it = cluster_indices.begin (); it != cluster_indices.end (); it++) {
@@ -334,15 +348,15 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
         }
 
         if (contains_centroid) {
-            pcl::CropBox<pcl::PointXYZ> targetFilter;
-            pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered_xyz (new pcl::PointCloud<pcl::PointXYZ>);
-            pcl::copyPointCloud(*cloud_filtered, *cloud_filtered_xyz);
+            pcl::CropBox<pcl::PointXYZRGB> targetFilter;
 
             targetFilter.setMin(Eigen::Vector4f(min[0], min[1], min[2], 1.0));
             targetFilter.setMax(Eigen::Vector4f(max[0], max[1], max[2], 1.0));
-            targetFilter.setInputCloud(cloud_filtered_xyz);
-            targetFilter.filter(*target_pc);
-            target_pub.publish(target_pc);
+            targetFilter.setInputCloud(cloud_filtered);
+            targetFilter.filter(*object_rgb);
+            //target_pub.publish(object_rgb);
+
+            pcl::copyPointCloud (*object_rgb, *target_pc);
         }
             
         marker_pub.publish(marker);
@@ -350,54 +364,122 @@ void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
         j++;
 
     }
-    
-    /*
-     *  If we have a centroid, we want to compute the difference between the target and the model
-     */
-
     // Load model (of mug)
     string homedir;
     if ((homedir = getenv("HOME")) == "") {
         homedir = getpwuid(getuid())->pw_dir;
     }
-    pcl::PointCloud<pcl::PointXYZ>::Ptr model = loadTarget(homedir + "/catkin_ws/src/tests/model.pcd");
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr model = loadTarget(homedir + "/catkin_ws/src/tests/model.pcd");
 
-    pcl::VoxelGrid<pcl::PointXYZ> sor2;
-    sor2.setInputCloud(model);
-    sor2.setLeafSize(0.005, 0.005, 0.005);
-    sor2.filter(*model);
-    
     if (target_found) {
-        pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
-        pcl::PointCloud<pcl::PointXYZ> icp_aligned;
-        icp.setInputSource(target_pc);
-        icp.setInputTarget(model);
-         
-        // Set the max correspondence distance to 5cm (e.g., correspondences with higher distances will be ignored)
-        icp.setMaxCorrespondenceDistance(0.5);
-        // Set the maximum number of iterations (criterion 1)
-        icp.setMaximumIterations(50);
-        // Set the transformation epsilon (criterion 2)
-        icp.setTransformationEpsilon(1e-8);
-        // Set the euclidean distance difference epsilon (criterion 3)
-        icp.setEuclideanFitnessEpsilon(1);
-         
-        // Perform the alignment
-        icp.align (icp_aligned);
-        icp_pub.publish (icp_aligned);
-        sensor_msgs::PointCloud2 model2_ros;
-        pcl::PCLPointCloud2* model2 = new pcl::PCLPointCloud2;
+        // Downsample Model
+        sor.setInputCloud(model);
+        sor.setLeafSize(leaf, leaf, leaf);
+        sor.filter(*model);
 
-        pcl::toPCLPointCloud2(*model, *model2);
-        pcl_conversions::fromPCL(*model2, model2_ros);
-        model2_ros.header.frame_id = FRAME_ID;
-        model2_ros.header.stamp = ros::Time::now();
-        model_pub.publish (model2_ros);
+        // Compute Centroids
+        pcl::PointCloud<pcl::PointXYZRGB>::Ptr orig_object (new pcl::PointCloud<pcl::PointXYZRGB>);
+        pcl::PointCloud<pcl::PointXYZRGB>::Ptr orig_model (new pcl::PointCloud<pcl::PointXYZRGB>);
+        pcl::copyPointCloud(*object_rgb, *orig_object);
+        pcl::copyPointCloud(*model, *orig_model);
+
+        Eigen::Vector4f object_centroid;
+        Eigen::Vector4f model_centroid;
+        pcl::compute3DCentroid (*object_rgb, object_centroid);
+        pcl::compute3DCentroid (*model, model_centroid);
+        pcl::demeanPointCloud (*orig_object, object_centroid, *object_rgb);
+        pcl::demeanPointCloud (*orig_model, model_centroid, *model);
+        model->header.frame_id = FRAME_ID;
+        pcl_conversions::toPCL (ros::Time::now(), model->header.stamp);
         
-        // Obtain the transformation that aligned cloud_source to cloud_source_registered
-        Eigen::Matrix4f transformation = icp.getFinalTransformation();
-        const Eigen::IOFormat fmt(4, 0, ", ", "\n", "[", "]");
-        cout << "Transformation Matrix: \n" << transformation.format(fmt) << endl;
+        // Estimate Normals for extracted object (to use in feature extraction)
+        pcl::PointCloud<pcl::Normal>::Ptr object_normals (new pcl::PointCloud<pcl::Normal>);
+        pcl::PointCloud<pcl::Normal>::Ptr model_normals (new pcl::PointCloud<pcl::Normal>);
+        pcl::PointCloud<pcl::Normal>::Ptr object_keypoint_normals (new pcl::PointCloud<pcl::Normal>);
+        pcl::PointCloud<pcl::Normal>::Ptr model_keypoint_normals (new pcl::PointCloud<pcl::Normal>);
+        //pcl::search::KdTree<pcl::PointWithScale>::Ptr pws_tree (new pcl::search::KdTree<pcl::PointWithScale>);
+
+        pcl::NormalEstimationOMP<pcl::PointXYZRGB, pcl::Normal> nest;
+        nest.setSearchMethod (tree); 
+        nest.setKSearch (20);
+
+        nest.setInputCloud (object_rgb);
+        nest.compute (*object_normals);
+        nest.setInputCloud (model);
+        nest.compute (*model_normals);
+
+       
+        // Estimate features (using Normals just computed)
+        pcl::PointCloud<FeatureT>::Ptr object_features (new pcl::PointCloud<FeatureT>);
+        pcl::PointCloud<FeatureT>::Ptr model_features (new pcl::PointCloud<FeatureT>);
+        
+        FeatureEstimationT fest;
+        fest.setSearchMethod (tree);
+        fest.setKSearch (30);
+
+        fest.setInputCloud (object_rgb);
+        fest.setInputNormals (object_normals);
+        fest.compute (*object_features);
+        fest.setInputCloud (model);
+        fest.setInputNormals (model_normals);
+        fest.compute (*model_features);
+
+        // Join point cloud and normals
+        pcl::PointCloud<PointRGBNT>::Ptr object_with_normals (new pcl::PointCloud<PointRGBNT>);
+        pcl::PointCloud<PointRGBNT>::Ptr model_with_normals (new pcl::PointCloud<PointRGBNT>);
+        //pcl::PointCloud<PointRGBNT>::Ptr object_kpts_with_normals (new pcl::PointCloud<PointRGBNT>);
+        //pcl::PointCloud<PointRGBNT>::Ptr model_kpts_with_normals (new pcl::PointCloud<PointRGBNT>);
+
+        pcl::concatenateFields (*object_rgb, *object_normals, *object_with_normals);
+        pcl::concatenateFields (*model, *model_normals, *model_with_normals);
+        //pcl::concatenateFields (*object_keypoints, *object_keypoint_normals, *object_kpts_with_normals);
+        //pcl::concatenateFields (*model_keypoints, *model_keypoint_normals, *model_kpts_with_normals);
+
+        // Peform initial pre-ICP alignment
+        pcl::PointCloud<PointRGBNT>::Ptr object_pre_icp (new pcl::PointCloud<PointRGBNT>);
+        pcl::SampleConsensusPrerejective<PointRGBNT, PointRGBNT, FeatureT> align;
+        //pcl::SampleConsensusInitialAlignment<PointRGBNT, PointRGBNT, FeatureT> align;
+
+        align.setInputSource (object_with_normals);
+        align.setSourceFeatures (object_features);
+        align.setInputTarget (model_with_normals);
+        align.setTargetFeatures (model_features);
+        align.setMaximumIterations (50000);
+        align.setNumberOfSamples (3);
+        align.setCorrespondenceRandomness (5);
+        align.setSimilarityThreshold (0.9f);
+        align.setMaxCorrespondenceDistance (2.5f * leaf);
+        align.setInlierFraction (0.25f);
+        align.align (*object_pre_icp);
+
+        keypoints_pub.publish (object_pre_icp);
+
+        // Try Transformation Estimation Symmetric Point To Plane LLS
+        pcl::IterativeClosestPointNonLinear<PointRGBNT, PointRGBNT> reg;
+        pcl::PointCloud<PointRGBNT>::Ptr object_registered (new pcl::PointCloud<PointRGBNT>);
+
+        reg.setInputSource (object_pre_icp);
+        reg.setInputTarget (model_with_normals);
+
+        reg.setMaximumIterations (5000);
+        reg.setTransformationEpsilon (1e-4);
+        reg.setEuclideanFitnessEpsilon (1e-8);
+        reg.setMaxCorrespondenceDistance (0.1);
+
+        model_pub.publish (model);
+        target_pub.publish (object_with_normals);
+
+        reg.align (*object_registered);
+        Eigen::Matrix4f transformation = reg.getFinalTransformation ();
+
+        if (reg.hasConverged ()) {
+            const Eigen::IOFormat fmt(4, 0, ", ", "\n", "[", "]");
+            cout << "Transformation Matrix: \n" << transformation.format(fmt) << endl;
+            transform_pub.publish (object_registered);
+        } else {
+            cout << "ICP has not converged" << endl;
+        }
+        cout << "Fitness Score: " << reg.getFitnessScore () << endl;
     }
 
     // Convert to ROS data type
@@ -455,9 +537,9 @@ void image_cb (const sensor_msgs::ImageConstPtr& image_msg) {
     vector<float> confidences = get<1>(confident_boxes);
 
 #pragma omp parallel for
-    for (int i = 0; i < boxes.size(); ++i)
-        cout << "BOX " << i << ":: x:" << boxes[i].x
-            << " y: " << boxes[i].y << " ";
+    for (int i = 0; i < boxes.size(); i++)
+        cout << "BOX" << i << "::x:" << boxes[i].x
+            << " y:" << boxes[i].y << " ";
     if (boxes.size() > 0) 
         cout << '\n';
     
@@ -482,8 +564,9 @@ int main (int argc, char** argv) {
     cout << "Advertising output \n";
     cloud_pub = nh.advertise<sensor_msgs::PointCloud2> ("output/cloud", 1);
     target_pub = nh.advertise<sensor_msgs::PointCloud2> ("output/target", 1);
-    icp_pub = nh.advertise<sensor_msgs::PointCloud2> ("output/icp", 1);
+    transform_pub = nh.advertise<sensor_msgs::PointCloud2> ("output/transformation", 1);
     model_pub = nh.advertise<sensor_msgs::PointCloud2> ("output/model", 1);
+    keypoints_pub = nh.advertise<sensor_msgs::PointCloud2> ("output/keypoints", 1);
     image_pub = it.advertise("/image_converter/output_video", 1);
     
     // Create marker publisher node

@@ -9,21 +9,22 @@
 #include <pcl/point_types.h>
 #include <pcl/io/pcd_io.h>
 #include <sensor_msgs/PointCloud2.h>
-#include <pcl/registration/icp.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/conversions.h>
 #include <pcl/filters/crop_box.h>
 #include <pcl/filters/voxel_grid.h>
+#include <pcl/filters/extract_indices.h>
+#include <pcl/segmentation/sac_segmentation.h>
 
 using namespace std;
 
 const string TARGET_FILE_NAME ="/root/catkin_ws/src/car_project/target.pcd";
 
 // load PCD file for target
-pcl::PointCloud<pcl::PointXYZ>::Ptr loadTarget(string targetFileName) {
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+pcl::PointCloud<pcl::PointXYZRGB>::Ptr loadTarget(string targetFileName) {
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
 
-    if (pcl::io::loadPCDFile<pcl::PointXYZ>(targetFileName, *cloud) == -1) {
+    if (pcl::io::loadPCDFile<pcl::PointXYZRGB>(targetFileName, *cloud) == -1) {
         PCL_ERROR("Couldn't read file \n");
     }
     cout << "Loaded " 
@@ -41,64 +42,68 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr loadTarget(string targetFileName) {
 
 void cloudTransform(const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
     // Container for source and target clouds
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_target = loadTarget(TARGET_FILE_NAME);
-    pcl::PCLPointCloud2* cloud_source2 = new pcl::PCLPointCloud2;
-    pcl::PCLPointCloud2ConstPtr cloudPtr(cloud_source2);
-    pcl_conversions::toPCL(*cloud_msg, *cloud_source2);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_source(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::fromPCLPointCloud2(*cloud_source2, *cloud_source);
-
-    pcl::PointCloud<pcl::PointXYZ> cloud_source_registered;
+    pcl::PCLPointCloud2* cloud2 = new pcl::PCLPointCloud2;
+    pcl::PCLPointCloud2ConstPtr cloudPtr(cloud2);
+    pcl_conversions::toPCL(*cloud_msg, *cloud2);
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud (new pcl::PointCloud<pcl::PointXYZRGB>);
+    pcl::fromPCLPointCloud2(*cloud2, *cloud);
     
-    pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
+    float minX = -0.5;
+    float minY = -0.5;
+    float minZ = -0.5;
+    float maxX = 0.5;
+    float maxY = 0.5;
+    float maxZ = 0.5;
 
-    /*const float bad_point = std::numeric_limits<float>::quiet_NaN();
-    for (size_t i = 0; i < cloud_source->points.size(); ++i) {
-        pcl::PointCloud<pcl::PointXYZ> p = cloud_source->points[i];
-        if(p.x == "nan" || p.y == "nan" || p.z == "nan")
-            p.x = p.y = p.z = bad_point;
-    }*/
-
-    float minX = -3.0;
-    float minY = -3.0;
-    float minZ = -1.5;
-    float maxX = 3.0;
-    float maxY = 3.0;
-    float maxZ = 1.5;
-	pcl::CropBox<pcl::PointXYZ> boxFilter;
+	pcl::CropBox<pcl::PointXYZRGB> boxFilter;
     boxFilter.setMin(Eigen::Vector4f(minX, minY, minZ, 1.0));
     boxFilter.setMax(Eigen::Vector4f(maxX, maxY, maxZ, 1.0));
-    boxFilter.setInputCloud(cloud_source);
-    boxFilter.filter(*cloud_source);
+    boxFilter.setInputCloud(cloud);
+    boxFilter.filter(*cloud);
     //cout << cloud_source->size() << endl;
-    boxFilter.setInputCloud(cloud_target);
-    boxFilter.filter(*cloud_target);
-    //cout << cloud_target->size() << endl;
-    pcl::VoxelGrid<pcl::PointXYZ> sor;
-    sor.setInputCloud(cloud_target);
+    pcl::VoxelGrid<pcl::PointXYZRGB> sor;
     sor.setLeafSize(0.005, 0.005, 0.005);
-    sor.filter(*cloud_target);
-
-    //cout << cloud_source->is_dense << endl;
-    icp.setInputSource(cloud_source);
-    icp.setInputTarget(cloud_target);
-     
-    // Set the max correspondence distance to 5cm (e.g., correspondences with higher distances will be ignored)
-    icp.setMaxCorrespondenceDistance(0.5);
-    // Set the maximum number of iterations (criterion 1)
-    icp.setMaximumIterations(50);
-    // Set the transformation epsilon (criterion 2)
-    icp.setTransformationEpsilon(1e-8);
-    // Set the euclidean distance difference epsilon (criterion 3)
-    icp.setEuclideanFitnessEpsilon(1);
-     
-    // Perform the alignment
-    icp.align (cloud_source_registered);
     
-    // Obtain the transformation that aligned cloud_source to cloud_source_registered
-    Eigen::Matrix4f transformation = icp.getFinalTransformation();
-    const Eigen::IOFormat fmt(4, 0, ", ", "\n", "[", "]");
-    cout << "Transformation Matrix: \n" << transformation.format(fmt) << endl;
+    // Create segmentation object for planar model and set params
+    pcl::SACSegmentation<pcl::PointXYZRGB> seg;
+    pcl::PointIndices::Ptr inliers (new pcl::PointIndices);
+    pcl::ModelCoefficients::Ptr coefficients (new pcl::ModelCoefficients);
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud_plane (new pcl::PointCloud<pcl::PointXYZRGB>());
+    seg.setOptimizeCoefficients (true);
+    seg.setModelType (pcl::SACMODEL_PLANE);
+    seg.setMethodType (pcl::SAC_RANSAC);
+    seg.setMaxIterations (100);
+    seg.setDistanceThreshold (0.02);
+
+    int i = 0, nr_points = (int) cloud->points.size();
+    while (cloud->points.size () > 0.3 * nr_points) {
+        // Segment the largest planar compontent from the remaining cloud
+        seg.setInputCloud (cloud);
+        seg.segment (*inliers, *coefficients);
+        if (inliers->indices.size () == 0) {
+            cout << "Could not estimate a planar model for the given dataset." << endl;
+        seg.segment (*inliers, *coefficients);
+            break;
+        }
+
+        // Extract the planar inliers from the input cloud
+        pcl::ExtractIndices<pcl::PointXYZRGB> extract;
+        extract.setInputCloud (cloud);
+        extract.setIndices (inliers);
+        extract.setNegative (false);
+
+        // Get the points associated with the planar surface
+        extract.filter(*cloud_plane);
+        //cout << "PointCloud representing the planar component: " << cloud_plane->size () << " data points." << endl;
+
+        // Remove the planar inliers, extract the rest
+        extract.setNegative (true);
+        extract.filter (*cloud);
+
+        ++i;
+    }
+
+    pcl::io::savePCDFile (TARGET_FILE_NAME, *cloud);
 }
 
 int main (int argc, char** argv) {
